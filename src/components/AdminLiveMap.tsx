@@ -474,8 +474,8 @@ export const AdminLiveMap: React.FC<AdminLiveMapProps> = ({
           </button>
         </div>
 
-        {/* Road Route Active Badge Overlay */}
-        {selectedSession && locationHistory.length > 1 && (
+        {/* Road Route Active Badge Overlay - Only display when genuine validated travel with distance > 0 exists */}
+        {selectedSession && routeStats && routeStats.distance > 0 && routeStats.pointCount > 1 && (
           <div className="pointer-events-auto bg-[#121215]/95 backdrop-blur border border-[#EF4444]/60 rounded-xl p-3 shadow-xl flex items-center gap-2 text-xs font-mono">
             <Route className="w-4 h-4 text-[#EF4444]" />
             <div>
@@ -484,9 +484,7 @@ export const AdminLiveMap: React.FC<AdminLiveMapProps> = ({
                 <span className="w-2 h-2 rounded-full bg-[#EF4444] animate-pulse"></span>
               </div>
               <div className="text-[11px] text-[#A0A0AA]">
-                {routeStats && routeStats.distance > 0
-                  ? `Road Distance: ${formatDistanceInMeters(routeStats.distance)}`
-                  : 'Road-matched trajectory active'}
+                Road Distance: {formatDistanceInMeters(routeStats.distance)}
               </div>
             </div>
           </div>
