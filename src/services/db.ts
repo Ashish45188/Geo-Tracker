@@ -17,8 +17,8 @@ const LOCAL_LINKS_KEY = 'geovideo_local_video_links';
 const LOCAL_SESSIONS_KEY = 'geovideo_local_visitor_sessions';
 const LOCAL_UPDATES_KEY = 'geovideo_local_location_updates';
 const LOCAL_CURRENT_KEY = 'geovideo_local_current_locations';
-// Disconnect detection threshold: 15 seconds missing heartbeat = disconnected / stale session
-export const STALE_SESSION_THRESHOLD_MS = 15 * 1000;
+// Disconnect detection threshold: 5 minutes missing heartbeat = disconnected / stale session
+export const STALE_SESSION_THRESHOLD_MS = 5 * 60 * 1000;
 
 // BroadcastChannel for instant cross-tab sync in local mode
 const localChannel = typeof window !== 'undefined' && 'BroadcastChannel' in window
@@ -444,35 +444,77 @@ export const db = {
   },
 
   async expireStaleSessions(): Promise<void> {
-    const cutoff = new Date(Date.now() - STALE_SESSION_THRESHOLD_MS).toISOString();
+    const cutoffMs = Date.now() - STALE_SESSION_THRESHOLD_MS;
+    const cutoffIso = new Date(cutoffMs).toISOString();
     const now = new Date().toISOString();
-    const updates: Partial<VisitorSession> = {
-      status: 'expired',
-      stopped_at: now,
-      stop_reason: 'Session expired after no location updates',
-      last_seen: now,
-    };
 
     const supabase = getSupabaseClient();
     if (supabase) {
-      const { error } = await supabase
+      // Fetch active sessions with their current_location to evaluate latest timestamp
+      const { data: activeSessions, error } = await supabase
         .from('visitor_sessions')
-        .update(updates)
-        .eq('status', 'active')
-        .lt('last_seen', cutoff);
+        .select('id, last_seen, created_at, current_locations(updated_at)')
+        .eq('status', 'active');
 
-      if (error) {
-        console.warn('Supabase stale-session cleanup failed:', error.message);
+      if (!error && activeSessions) {
+        const expiredIds: string[] = [];
+        for (const s of activeSessions) {
+          const sLastSeen = s.last_seen ? new Date(s.last_seen).getTime() : 0;
+          const sCreatedAt = s.created_at ? new Date(s.created_at).getTime() : 0;
+          const locUpdatedAt =
+            s.current_locations && Array.isArray(s.current_locations) && s.current_locations[0]?.updated_at
+              ? new Date(s.current_locations[0].updated_at).getTime()
+              : s.current_locations && (s.current_locations as any).updated_at
+              ? new Date((s.current_locations as any).updated_at).getTime()
+              : 0;
+
+          const latestActivityTime = Math.max(sLastSeen, sCreatedAt, locUpdatedAt);
+          if (latestActivityTime > 0 && latestActivityTime < cutoffMs) {
+            expiredIds.push(s.id);
+          }
+        }
+
+        if (expiredIds.length > 0) {
+          const { error: updateError } = await supabase
+            .from('visitor_sessions')
+            .update({
+              status: 'expired',
+              stopped_at: now,
+              stop_reason: 'Session expired after no location updates',
+              last_seen: now,
+            })
+            .in('id', expiredIds);
+
+          if (updateError) {
+            console.warn('Supabase stale-session cleanup update failed:', updateError.message);
+          }
+        }
+      } else if (error) {
+        console.warn('Supabase stale-session query failed:', error.message);
       }
     }
 
     const sessions = getLocalData<VisitorSession[]>(LOCAL_SESSIONS_KEY, []);
+    const currentLocations = getLocalData<Record<string, CurrentLocation>>(LOCAL_CURRENT_KEY, {});
     let changed = false;
     const updated = sessions.map((session) => {
-      const lastSeen = session.last_seen || session.created_at;
-      if (session.status === 'active' && lastSeen < cutoff) {
+      if (session.status !== 'active') return session;
+
+      const sLastSeen = session.last_seen ? new Date(session.last_seen).getTime() : 0;
+      const sCreatedAt = session.created_at ? new Date(session.created_at).getTime() : 0;
+      const loc = currentLocations[session.id];
+      const locUpdatedAt = loc?.updated_at ? new Date(loc.updated_at).getTime() : 0;
+
+      const latestActivityTime = Math.max(sLastSeen, sCreatedAt, locUpdatedAt);
+      if (latestActivityTime > 0 && latestActivityTime < cutoffMs) {
         changed = true;
-        return { ...session, ...updates };
+        return {
+          ...session,
+          status: 'expired' as SessionStatus,
+          stopped_at: now,
+          stop_reason: 'Session expired after no location updates',
+          last_seen: now,
+        };
       }
       return session;
     });
@@ -555,8 +597,6 @@ export const db = {
       await supabase.from('current_locations').upsert(currentRecord, { onConflict: 'session_id' });
 
       // 3. Update session last_seen and self-heal status back to 'active'
-      // (a successful GPS fix means the visitor is sharing again, even if an
-      // earlier fix had timed out and flipped the status away from 'active')
       await supabase
         .from('visitor_sessions')
         .update({ last_seen: now, status: 'active' })
@@ -574,11 +614,16 @@ export const db = {
     allCurrent[sessionId] = currentRecord;
     setLocalData(LOCAL_CURRENT_KEY, allCurrent);
 
-    // Update session last seen
+    // Update session last seen and status
     const sessions = getLocalData<VisitorSession[]>(LOCAL_SESSIONS_KEY, []);
+    const allowedStatuses = ['active', 'location_unavailable', 'waiting', 'expired'];
     setLocalData(
       LOCAL_SESSIONS_KEY,
-      sessions.map((s) => (s.id === sessionId ? { ...s, last_seen: now } : s))
+      sessions.map((s) =>
+        s.id === sessionId && allowedStatuses.includes(s.status)
+          ? { ...s, last_seen: now, status: 'active' }
+          : s
+      )
     );
 
     return { updateId };

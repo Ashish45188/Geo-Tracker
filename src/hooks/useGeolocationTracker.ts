@@ -295,7 +295,7 @@ export function useGeolocationTracker({
     );
   }, [processPosition, handlePositionError]);
 
-  // Automatically reconnect/resume tracking when network comes back online
+  // Automatically reconnect/resume tracking when network comes back online or page becomes visible/foreground
   useEffect(() => {
     const handleOnline = () => {
       console.log('=== NETWORK RECONNECTED === Resuming tracking...');
@@ -304,9 +304,20 @@ export function useGeolocationTracker({
       }
     };
 
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        console.log('=== PAGE FOREGROUND RE-ACTIVATED === Resuming location tracking...');
+        if (isActive && sessionId && !isStoppedRef.current) {
+          startTracking();
+        }
+      }
+    };
+
     window.addEventListener('online', handleOnline);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       window.removeEventListener('online', handleOnline);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [isActive, sessionId, startTracking]);
 
