@@ -46,6 +46,30 @@ function setLocalData<T>(key: string, data: T): void {
   }
 }
 
+/**
+ * Retry helper for transient network/database operations.
+ */
+async function withRetry<T>(
+  operationName: string,
+  fn: () => Promise<T>,
+  retries = 3,
+  delayMs = 800
+): Promise<T> {
+  let lastError: any;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`[DB RETRY] ${operationName} failed (attempt ${attempt}/${retries}):`, err?.message || err);
+      if (attempt < retries) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs * attempt));
+      }
+    }
+  }
+  throw lastError;
+}
+
 // Seed initial sample link if empty
 function initializeSeedDataIfNeeded() {
   const existing = getLocalData<VideoLink[]>(LOCAL_LINKS_KEY, []);
@@ -100,15 +124,19 @@ export const db = {
   async getVideoLinks(): Promise<VideoLink[]> {
     const supabase = getSupabaseClient();
     if (supabase) {
-      const { data, error } = await supabase
-        .from('video_links')
-        .select('*')
-        .order('created_at', { ascending: false });
+      try {
+        const { data, error } = await supabase
+          .from('video_links')
+          .select('*')
+          .order('created_at', { ascending: false });
 
-      if (!error && data) {
-        return data as VideoLink[];
+        if (!error && data) {
+          return data as VideoLink[];
+        }
+        console.warn('[DB] Supabase getVideoLinks error:', error?.message);
+      } catch (err: any) {
+        console.warn('[DB] Supabase getVideoLinks exception:', err?.message);
       }
-      console.warn('Supabase getVideoLinks fallback to local:', error?.message);
     }
 
     const list = getLocalData<VideoLink[]>(LOCAL_LINKS_KEY, []);
@@ -118,14 +146,18 @@ export const db = {
   async getVideoLinkByShareId(shareId: string): Promise<VideoLink | null> {
     const supabase = getSupabaseClient();
     if (supabase) {
-      const { data, error } = await supabase
-        .from('video_links')
-        .select('*')
-        .eq('share_id', shareId)
-        .maybeSingle();
+      try {
+        const { data, error } = await supabase
+          .from('video_links')
+          .select('*')
+          .eq('share_id', shareId)
+          .maybeSingle();
 
-      if (!error && data) {
-        return data as VideoLink;
+        if (!error && data) {
+          return data as VideoLink;
+        }
+      } catch (err: any) {
+        console.warn('[DB] Supabase getVideoLinkByShareId exception:', err?.message);
       }
     }
 
@@ -210,26 +242,31 @@ export const db = {
 
     const supabase = getSupabaseClient();
     if (supabase) {
-      const { data, error } = await supabase
-        .from('video_links')
-        .insert({
-          share_id: newLink.share_id,
-          custom_name: newLink.custom_name,
-          description: newLink.description,
-          media_type: newLink.media_type,
-          media_url: newLink.media_url,
-          thumbnail_url: newLink.thumbnail_url,
-          youtube_url: newLink.youtube_url,
-          youtube_video_id: newLink.youtube_video_id,
-          active: true,
-        })
-        .select()
-        .single();
+      try {
+        const { data, error } = await supabase
+          .from('video_links')
+          .insert({
+            share_id: newLink.share_id,
+            custom_name: newLink.custom_name,
+            description: newLink.description,
+            media_type: newLink.media_type,
+            media_url: newLink.media_url,
+            thumbnail_url: newLink.thumbnail_url,
+            youtube_url: newLink.youtube_url,
+            youtube_video_id: newLink.youtube_video_id,
+            active: true,
+          })
+          .select()
+          .single();
 
-      if (!error && data) {
-        return data as VideoLink;
+        if (!error && data) {
+          console.log('[DB] Video link created in Supabase:', (data as VideoLink).id);
+          return data as VideoLink;
+        }
+        console.warn('[DB] Supabase createVideoLink failed:', error?.message);
+      } catch (err: any) {
+        console.warn('[DB] Supabase createVideoLink exception:', err?.message);
       }
-      console.warn('Supabase createVideoLink failed, storing locally:', error?.message);
     }
 
     const current = getLocalData<VideoLink[]>(LOCAL_LINKS_KEY, []);
@@ -240,7 +277,11 @@ export const db = {
   async toggleVideoLinkStatus(id: string, active: boolean): Promise<void> {
     const supabase = getSupabaseClient();
     if (supabase) {
-      await supabase.from('video_links').update({ active }).eq('id', id);
+      try {
+        await supabase.from('video_links').update({ active }).eq('id', id);
+      } catch (err: any) {
+        console.warn('[DB] Supabase toggleVideoLinkStatus exception:', err?.message);
+      }
     }
 
     const current = getLocalData<VideoLink[]>(LOCAL_LINKS_KEY, []);
@@ -251,7 +292,11 @@ export const db = {
   async deleteVideoLink(id: string): Promise<void> {
     const supabase = getSupabaseClient();
     if (supabase) {
-      await supabase.from('video_links').delete().eq('id', id);
+      try {
+        await supabase.from('video_links').delete().eq('id', id);
+      } catch (err: any) {
+        console.warn('[DB] Supabase deleteVideoLink exception:', err?.message);
+      }
     }
 
     const current = getLocalData<VideoLink[]>(LOCAL_LINKS_KEY, []);
@@ -264,10 +309,9 @@ export const db = {
   async deleteVisitorSession(id: string): Promise<void> {
     const supabase = getSupabaseClient();
     if (supabase) {
-      // ON DELETE CASCADE on location_updates/current_locations takes care
-      // of clearing that session's telemetry automatically.
       const { error } = await supabase.from('visitor_sessions').delete().eq('id', id);
       if (error) {
+        console.warn('[DB] Supabase deleteVisitorSession error:', error.message);
         throw new Error(`Failed to delete visitor session: ${error.message}`);
       }
     }
@@ -301,29 +345,29 @@ export const db = {
 
     const supabase = getSupabaseClient();
     if (supabase && initialStatus === 'active') {
-      // Reuse an existing live session for this exact visitor + link
-      // instead of creating a duplicate. Without this, every page
-      // reload / re-consent created a brand new overlapping "active"
-      // session, which made the Active Sessions list flicker as it
-      // kept jumping between several rows for the same visitor.
-      const { data: existing } = await supabase
-        .from('visitor_sessions')
-        .select('*')
-        .eq('video_link_id', videoLinkId)
-        .eq('visitor_id', visitorId)
-        .in('status', ['active', 'waiting', 'location_unavailable'])
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (existing) {
-        const { data: refreshed } = await supabase
+      try {
+        const { data: existing } = await supabase
           .from('visitor_sessions')
-          .update({ status: 'active', last_seen: now })
-          .eq('id', existing.id)
-          .select()
-          .single();
-        return (refreshed || existing) as VisitorSession;
+          .select('*')
+          .eq('video_link_id', videoLinkId)
+          .eq('visitor_id', visitorId)
+          .in('status', ['active', 'waiting', 'location_unavailable'])
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (existing) {
+          console.log('[DB] Reusing active visitor session:', existing.id);
+          const { data: refreshed } = await supabase
+            .from('visitor_sessions')
+            .update({ status: 'active', last_seen: now })
+            .eq('id', existing.id)
+            .select()
+            .single();
+          return (refreshed || existing) as VisitorSession;
+        }
+      } catch (err: any) {
+        console.warn('[DB] Exception checking existing session:', err?.message);
       }
     }
 
@@ -339,23 +383,28 @@ export const db = {
     };
 
     if (supabase) {
-      const { data, error } = await supabase
-        .from('visitor_sessions')
-        .insert({
-          video_link_id: videoLinkId,
-          visitor_id: visitorId,
-          status: initialStatus,
-          consent_given: initialStatus === 'active',
-          started_at: newSession.started_at,
-          last_seen: newSession.last_seen,
-        })
-        .select()
-        .single();
+      try {
+        const { data, error } = await supabase
+          .from('visitor_sessions')
+          .insert({
+            video_link_id: videoLinkId,
+            visitor_id: visitorId,
+            status: initialStatus,
+            consent_given: initialStatus === 'active',
+            started_at: newSession.started_at,
+            last_seen: newSession.last_seen,
+          })
+          .select()
+          .single();
 
-      if (!error && data) {
-        return data as VisitorSession;
+        if (!error && data) {
+          console.log('[DB] Created visitor session in Supabase:', (data as VisitorSession).id);
+          return data as VisitorSession;
+        }
+        console.warn('[DB] Supabase createVisitorSession failed:', error?.message);
+      } catch (err: any) {
+        console.warn('[DB] Supabase createVisitorSession exception:', err?.message);
       }
-      console.warn('Supabase createVisitorSession fallback to local:', error?.message);
     }
 
     const sessions = getLocalData<VisitorSession[]>(LOCAL_SESSIONS_KEY, []);
@@ -366,14 +415,18 @@ export const db = {
   async getVisitorSession(sessionId: string): Promise<VisitorSession | null> {
     const supabase = getSupabaseClient();
     if (supabase) {
-      const { data, error } = await supabase
-        .from('visitor_sessions')
-        .select('*, video_link:video_links(*)')
-        .eq('id', sessionId)
-        .maybeSingle();
+      try {
+        const { data, error } = await supabase
+          .from('visitor_sessions')
+          .select('*, video_link:video_links(*)')
+          .eq('id', sessionId)
+          .maybeSingle();
 
-      if (!error && data) {
-        return data as VisitorSession;
+        if (!error && data) {
+          return data as VisitorSession;
+        }
+      } catch (err: any) {
+        console.warn('[DB] Supabase getVisitorSession exception:', err?.message);
       }
     }
 
@@ -408,9 +461,18 @@ export const db = {
       if (stopReason) updates.stop_reason = stopReason;
     }
 
+    console.log(`[DB] Updating session ${sessionId} status to '${status}' (reason: ${stopReason || 'N/A'})`);
+
     const supabase = getSupabaseClient();
     if (supabase) {
-      await supabase.from('visitor_sessions').update(updates).eq('id', sessionId);
+      try {
+        await withRetry('updateVisitorSessionStatus', async () => {
+          const { error } = await supabase.from('visitor_sessions').update(updates).eq('id', sessionId);
+          if (error) throw new Error(error.message);
+        });
+      } catch (err: any) {
+        console.warn(`[DB] Failed to update session ${sessionId} status in Supabase:`, err?.message);
+      }
     }
 
     const sessions = getLocalData<VisitorSession[]>(LOCAL_SESSIONS_KEY, []);
@@ -424,13 +486,18 @@ export const db = {
     const allowedStatuses = ['active', 'location_unavailable', 'waiting', 'expired'];
 
     if (supabase) {
-      const { error } = await supabase
-        .from('visitor_sessions')
-        .update({ last_seen: now, status: 'active' })
-        .eq('id', sessionId)
-        .in('status', allowedStatuses);
-      if (error) {
-        console.warn('Failed to refresh visitor session heartbeat:', error.message);
+      try {
+        await withRetry('touchVisitorSession', async () => {
+          const { error } = await supabase
+            .from('visitor_sessions')
+            .update({ last_seen: now, status: 'active' })
+            .eq('id', sessionId)
+            .in('status', allowedStatuses);
+          if (error) throw new Error(error.message);
+        });
+        console.log(`[DB HEARTBEAT] Refreshed heartbeat last_seen for session: ${sessionId}`);
+      } catch (err: any) {
+        console.warn(`[DB HEARTBEAT ERROR] Failed to update heartbeat for session ${sessionId}:`, err?.message);
       }
     }
 
@@ -445,55 +512,66 @@ export const db = {
 
   async expireStaleSessions(): Promise<void> {
     const cutoffMs = Date.now() - STALE_SESSION_THRESHOLD_MS;
-    const cutoffIso = new Date(cutoffMs).toISOString();
     const now = new Date().toISOString();
 
     const supabase = getSupabaseClient();
     if (supabase) {
-      // Fetch active sessions with their current_location to evaluate latest timestamp
-      const { data: activeSessions, error } = await supabase
-        .from('visitor_sessions')
-        .select('id, last_seen, created_at, current_locations(updated_at)')
-        .eq('status', 'active');
+      try {
+        const { data: activeSessions, error } = await supabase
+          .from('visitor_sessions')
+          .select('id, last_seen, created_at, current_locations(updated_at)')
+          .eq('status', 'active');
 
-      if (!error && activeSessions) {
-        const expiredIds: string[] = [];
-        for (const s of activeSessions) {
-          const sLastSeen = s.last_seen ? new Date(s.last_seen).getTime() : 0;
-          const sCreatedAt = s.created_at ? new Date(s.created_at).getTime() : 0;
-          const locUpdatedAt =
-            s.current_locations && Array.isArray(s.current_locations) && s.current_locations[0]?.updated_at
-              ? new Date(s.current_locations[0].updated_at).getTime()
-              : s.current_locations && (s.current_locations as any).updated_at
-              ? new Date((s.current_locations as any).updated_at).getTime()
-              : 0;
+        if (!error && activeSessions) {
+          const expiredIds: string[] = [];
+          for (const s of activeSessions) {
+            const sLastSeen = s.last_seen ? new Date(s.last_seen).getTime() : 0;
+            const sCreatedAt = s.created_at ? new Date(s.created_at).getTime() : 0;
+            const locUpdatedAt =
+              s.current_locations && Array.isArray(s.current_locations) && s.current_locations[0]?.updated_at
+                ? new Date(s.current_locations[0].updated_at).getTime()
+                : s.current_locations && (s.current_locations as any).updated_at
+                ? new Date((s.current_locations as any).updated_at).getTime()
+                : 0;
 
-          const latestActivityTime = Math.max(sLastSeen, sCreatedAt, locUpdatedAt);
-          if (latestActivityTime > 0 && latestActivityTime < cutoffMs) {
-            expiredIds.push(s.id);
+            const latestActivityTime = Math.max(sLastSeen, sCreatedAt, locUpdatedAt);
+            if (latestActivityTime > 0 && latestActivityTime < cutoffMs) {
+              const inactiveSecs = Math.round((Date.now() - latestActivityTime) / 1000);
+              console.log(
+                `[DB EXPIRY] Stale session detected: session=${s.id}, inactiveFor=${inactiveSecs}s (threshold=${
+                  STALE_SESSION_THRESHOLD_MS / 1000
+                }s)`
+              );
+              expiredIds.push(s.id);
+            }
           }
-        }
 
-        if (expiredIds.length > 0) {
-          const { error: updateError } = await supabase
-            .from('visitor_sessions')
-            .update({
-              status: 'expired',
-              stopped_at: now,
-              stop_reason: 'Session expired after no location updates',
-              last_seen: now,
-            })
-            .in('id', expiredIds);
+          if (expiredIds.length > 0) {
+            const { error: updateError } = await supabase
+              .from('visitor_sessions')
+              .update({
+                status: 'expired',
+                stopped_at: now,
+                stop_reason: 'Session expired after missing location updates and heartbeat',
+                last_seen: now,
+              })
+              .in('id', expiredIds);
 
-          if (updateError) {
-            console.warn('Supabase stale-session cleanup update failed:', updateError.message);
+            if (updateError) {
+              console.warn('[DB EXPIRY] Supabase stale-session cleanup update failed:', updateError.message);
+            } else {
+              console.log(`[DB EXPIRY] Marked ${expiredIds.length} stale session(s) as expired.`);
+            }
           }
+        } else if (error) {
+          console.warn('[DB EXPIRY] Supabase stale-session query failed:', error.message);
         }
-      } else if (error) {
-        console.warn('Supabase stale-session query failed:', error.message);
+      } catch (err: any) {
+        console.warn('[DB EXPIRY] Exception during stale session expiry check:', err?.message);
       }
     }
 
+    // Local storage fallback
     const sessions = getLocalData<VisitorSession[]>(LOCAL_SESSIONS_KEY, []);
     const currentLocations = getLocalData<Record<string, CurrentLocation>>(LOCAL_CURRENT_KEY, {});
     let changed = false;
@@ -508,11 +586,16 @@ export const db = {
       const latestActivityTime = Math.max(sLastSeen, sCreatedAt, locUpdatedAt);
       if (latestActivityTime > 0 && latestActivityTime < cutoffMs) {
         changed = true;
+        console.log(
+          `[LOCAL EXPIRY] Stale local session detected: session=${session.id}, inactiveFor=${Math.round(
+            (Date.now() - latestActivityTime) / 1000
+          )}s`
+        );
         return {
           ...session,
           status: 'expired' as SessionStatus,
           stopped_at: now,
-          stop_reason: 'Session expired after no location updates',
+          stop_reason: 'Session expired after missing location updates and heartbeat',
           last_seen: now,
         };
       }
@@ -542,10 +625,17 @@ export const db = {
 
     const supabase = getSupabaseClient();
     if (supabase) {
-      const { error } = await supabase
-        .from('current_locations')
-        .upsert(currentRecord, { onConflict: 'session_id' });
-      if (error) throw new Error(`Failed to update current location: ${error.message}`);
+      try {
+        await withRetry('updateCurrentLocation', async () => {
+          const { error } = await supabase
+            .from('current_locations')
+            .upsert(currentRecord, { onConflict: 'session_id' });
+          if (error) throw new Error(error.message);
+        });
+        console.log(`[DB] Upserted current_locations for session: ${sessionId}`);
+      } catch (err: any) {
+        console.warn(`[DB ERROR] Failed to upsert current location for session ${sessionId}:`, err?.message);
+      }
       await this.touchVisitorSession(sessionId);
       return;
     }
@@ -590,20 +680,32 @@ export const db = {
 
     const supabase = getSupabaseClient();
     if (supabase) {
-      // 1. Insert into location_updates
-      await supabase.from('location_updates').insert(updateRecord);
+      try {
+        await withRetry('recordLocationUpdate', async () => {
+          // 1. Insert into location_updates
+          const { error: insertError } = await supabase.from('location_updates').insert(updateRecord);
+          if (insertError) throw new Error(`Insert error: ${insertError.message}`);
 
-      // 2. Upsert into current_locations
-      await supabase.from('current_locations').upsert(currentRecord, { onConflict: 'session_id' });
+          // 2. Upsert into current_locations
+          const { error: upsertError } = await supabase
+            .from('current_locations')
+            .upsert(currentRecord, { onConflict: 'session_id' });
+          if (upsertError) throw new Error(`Upsert error: ${upsertError.message}`);
 
-      // 3. Update session last_seen and self-heal status back to 'active'
-      await supabase
-        .from('visitor_sessions')
-        .update({ last_seen: now, status: 'active' })
-        .eq('id', sessionId)
-        .in('status', ['active', 'location_unavailable', 'waiting', 'expired']);
+          // 3. Update session last_seen and self-heal status back to 'active'
+          const { error: sessionError } = await supabase
+            .from('visitor_sessions')
+            .update({ last_seen: now, status: 'active' })
+            .eq('id', sessionId)
+            .in('status', ['active', 'location_unavailable', 'waiting', 'expired']);
+          if (sessionError) throw new Error(`Session update error: ${sessionError.message}`);
+        });
 
-      return { updateId };
+        console.log(`[DB] Saved location update & refreshed status for session: ${sessionId}`);
+        return { updateId };
+      } catch (err: any) {
+        console.warn(`[DB ERROR] Failed to record location update in Supabase for session ${sessionId}:`, err?.message);
+      }
     }
 
     // Local fallback
@@ -638,22 +740,27 @@ export const db = {
   async getAllSessions(): Promise<SessionWithLocation[]> {
     const supabase = getSupabaseClient();
     if (supabase) {
-      const { data: sessions, error } = await supabase
-        .from('visitor_sessions')
-        .select(`
-          *,
-          video_link:video_links(*),
-          current_location:current_locations(*)
-        `)
-        .order('created_at', { ascending: false });
+      try {
+        const { data: sessions, error } = await supabase
+          .from('visitor_sessions')
+          .select(`
+            *,
+            video_link:video_links(*),
+            current_location:current_locations(*)
+          `)
+          .order('created_at', { ascending: false });
 
-      if (!error && sessions) {
-        return sessions.map((s: any) => ({
-          ...s,
-          current_location: Array.isArray(s.current_location)
-            ? s.current_location[0] || null
-            : s.current_location || null,
-        })) as SessionWithLocation[];
+        if (!error && sessions) {
+          return sessions.map((s: any) => ({
+            ...s,
+            current_location: Array.isArray(s.current_location)
+              ? s.current_location[0] || null
+              : s.current_location || null,
+          })) as SessionWithLocation[];
+        }
+        console.warn('[DB] Supabase getAllSessions error:', error?.message);
+      } catch (err: any) {
+        console.warn('[DB] Supabase getAllSessions exception:', err?.message);
       }
     }
 
@@ -681,14 +788,19 @@ export const db = {
   async getLocationHistory(sessionId: string): Promise<LocationUpdate[]> {
     const supabase = getSupabaseClient();
     if (supabase) {
-      const { data, error } = await supabase
-        .from('location_updates')
-        .select('*')
-        .eq('session_id', sessionId)
-        .order('created_at', { ascending: true });
+      try {
+        const { data, error } = await supabase
+          .from('location_updates')
+          .select('*')
+          .eq('session_id', sessionId)
+          .order('created_at', { ascending: true });
 
-      if (!error && data) {
-        return data as LocationUpdate[];
+        if (!error && data) {
+          return data as LocationUpdate[];
+        }
+        console.warn('[DB] Supabase getLocationHistory error:', error?.message);
+      } catch (err: any) {
+        console.warn('[DB] Supabase getLocationHistory exception:', err?.message);
       }
     }
 
