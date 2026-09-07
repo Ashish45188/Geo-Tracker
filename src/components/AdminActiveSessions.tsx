@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { SessionWithLocation } from '../types';
+import { db } from '../services/db';
 import { formatCoordinates, formatAccuracy, formatTimestamp, getGoogleMapsUrl } from '../utils/geo';
 import {
   Radio,
@@ -189,7 +190,24 @@ export const AdminActiveSessions: React.FC<AdminActiveSessionsProps> = ({
                             href={getGoogleMapsUrl(loc.latitude, loc.longitude)}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="text-[10px] text-[#D1FF26] hover:underline flex items-center gap-1 font-mono uppercase"
+                            onClick={async (e) => {
+                              e.preventDefault();
+                              const mapWin = window.open('about:blank', '_blank');
+                              try {
+                                const latest = await db.getLatestLocation(session.id);
+                                const lat = latest?.latitude ?? loc.latitude;
+                                const lng = latest?.longitude ?? loc.longitude;
+                                if (mapWin) {
+                                  mapWin.location.href = getGoogleMapsUrl(lat, lng);
+                                }
+                              } catch (err) {
+                                console.warn('Failed to fetch latest location:', err);
+                                if (mapWin) {
+                                  mapWin.location.href = getGoogleMapsUrl(loc.latitude, loc.longitude);
+                                }
+                              }
+                            }}
+                            className="text-[10px] text-[#D1FF26] hover:underline flex items-center gap-1 font-mono uppercase cursor-pointer"
                           >
                             <span>Google Maps</span>
                             <ExternalLink className="w-2.5 h-2.5" />

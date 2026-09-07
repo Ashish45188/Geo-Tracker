@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import { SessionWithLocation, LocationUpdate } from '../types';
+import { db } from '../services/db';
 import { fetchRoadRoute, filterRoutePoints } from '../services/routeService';
 import {
   calculateDistanceInMeters,
@@ -19,6 +20,12 @@ interface AdminLiveMapProps {
   locationHistory?: LocationUpdate[];
 }
 
+declare global {
+  interface Window {
+    __openGoogleMapsForSession?: (sessionId: string, fallbackLat: number, fallbackLng: number) => void;
+  }
+}
+
 export const AdminLiveMap: React.FC<AdminLiveMapProps> = ({
   sessions,
   selectedSessionId,
@@ -26,6 +33,26 @@ export const AdminLiveMap: React.FC<AdminLiveMapProps> = ({
   locationHistory = [],
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    window.__openGoogleMapsForSession = async (sessionId: string, fallbackLat: number, fallbackLng: number) => {
+      const mapWin = window.open('about:blank', '_blank');
+      let lat = fallbackLat;
+      let lng = fallbackLng;
+      try {
+        const latest = await db.getLatestLocation(sessionId);
+        if (latest && latest.latitude !== undefined && latest.longitude !== undefined) {
+          lat = latest.latitude;
+          lng = latest.longitude;
+        }
+      } catch (err) {
+        console.warn('Failed to fetch latest location for Google Maps:', err);
+      }
+      if (mapWin) {
+        mapWin.location.href = getGoogleMapsUrl(lat, lng);
+      }
+    };
+  }, []);
   const mapInstanceRef = useRef<L.Map | null>(null);
   const [developerLocation, setDeveloperLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [routeStats, setRouteStats] = useState<{ distance: number; provider: string; pointCount: number } | null>(null);
@@ -185,15 +212,14 @@ export const AdminLiveMap: React.FC<AdminLiveMapProps> = ({
             </div>
           </div>
           <div class="mt-3 pt-2 border-t border-[#28282E]">
-            <a 
-              href="${getGoogleMapsUrl(latitude, longitude)}" 
-              target="_blank" 
-              rel="noopener noreferrer"
-              class="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 bg-[#D1FF26] hover:bg-[#bfe822] text-black rounded-lg text-xs font-mono font-bold uppercase tracking-wider transition"
+            <button
+              type="button"
+              onclick="if(window.__openGoogleMapsForSession){window.__openGoogleMapsForSession('${session.id}', ${latitude}, ${longitude});}"
+              class="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 bg-[#D1FF26] hover:bg-[#bfe822] text-black rounded-lg text-xs font-mono font-bold uppercase tracking-wider transition cursor-pointer"
             >
               <span>Open Google Maps</span>
               <svg class="w-3.5 h-3.5 text-black" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
-            </a>
+            </button>
           </div>
         </div>
       `;
@@ -522,7 +548,25 @@ export const AdminLiveMap: React.FC<AdminLiveMapProps> = ({
                 )}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 bg-[#D1FF26] hover:bg-[#bfe822] text-black rounded-lg text-[11px] font-bold uppercase tracking-wider transition"
+                onClick={async (e) => {
+                  e.preventDefault();
+                  const mapWin = window.open('about:blank', '_blank');
+                  let lat = selectedSession.current_location!.latitude;
+                  let lng = selectedSession.current_location!.longitude;
+                  try {
+                    const latest = await db.getLatestLocation(selectedSession.id);
+                    if (latest) {
+                      lat = latest.latitude;
+                      lng = latest.longitude;
+                    }
+                  } catch (err) {
+                    console.warn('Failed to fetch latest location:', err);
+                  }
+                  if (mapWin) {
+                    mapWin.location.href = getGoogleMapsUrl(lat, lng);
+                  }
+                }}
+                className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 bg-[#D1FF26] hover:bg-[#bfe822] text-black rounded-lg text-[11px] font-bold uppercase tracking-wider transition cursor-pointer"
               >
                 <span>Google Maps View</span>
                 <ExternalLink className="w-3 h-3 text-black" />

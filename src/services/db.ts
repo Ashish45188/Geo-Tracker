@@ -785,6 +785,56 @@ export const db = {
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
   },
 
+  async getLatestLocation(sessionId: string): Promise<{ latitude: number; longitude: number } | null> {
+    const supabase = getSupabaseClient();
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('current_locations')
+          .select('latitude, longitude')
+          .eq('session_id', sessionId)
+          .maybeSingle();
+
+        if (!error && data && data.latitude !== undefined && data.longitude !== undefined) {
+          return { latitude: Number(data.latitude), longitude: Number(data.longitude) };
+        }
+
+        // Fallback to latest point in location_updates
+        const { data: histData, error: histError } = await supabase
+          .from('location_updates')
+          .select('latitude, longitude')
+          .eq('session_id', sessionId)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!histError && histData && histData.latitude !== undefined && histData.longitude !== undefined) {
+          return { latitude: Number(histData.latitude), longitude: Number(histData.longitude) };
+        }
+      } catch (err: any) {
+        console.warn('[DB] Supabase getLatestLocation exception:', err?.message);
+      }
+    }
+
+    // Local fallback
+    const allCurrent = getLocalData<Record<string, CurrentLocation>>(LOCAL_CURRENT_KEY, {});
+    const currentLoc = allCurrent[sessionId];
+    if (currentLoc && currentLoc.latitude !== undefined && currentLoc.longitude !== undefined) {
+      return { latitude: Number(currentLoc.latitude), longitude: Number(currentLoc.longitude) };
+    }
+
+    const updates = getLocalData<LocationUpdate[]>(LOCAL_UPDATES_KEY, []);
+    const sessionUpdates = updates.filter((u) => u.session_id === sessionId);
+    if (sessionUpdates.length > 0) {
+      const latest = sessionUpdates.sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      )[0];
+      return { latitude: Number(latest.latitude), longitude: Number(latest.longitude) };
+    }
+
+    return null;
+  },
+
   async getLocationHistory(sessionId: string): Promise<LocationUpdate[]> {
     const supabase = getSupabaseClient();
     if (supabase) {
