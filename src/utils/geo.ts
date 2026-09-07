@@ -28,14 +28,16 @@ export function formatDistanceInMeters(distance: number): string {
   return `${(distance / 1000).toFixed(2)} km`;
 }
 
+export const MAX_POOR_ACCURACY_METERS = 100; // Ignore GPS points with accuracy worse than ±100m
+export const MAX_REALISTIC_SPEED_MPS = 50; // Max speed threshold (50 m/s = 180 km/h) to filter unrealistic jumps
+
 /**
- * Strategy check: Should a new location update be saved to Supabase/DB?
- * Only save when:
- * 1. At least 5 seconds (5000ms) have passed
- * OR
- * 2. The visitor moved at least 10 meters
- * OR
- * 3. The accuracy significantly improved (e.g., accuracy reduced by >= 25% or by >= 10m)
+ * Strategy check: Should a new location update be saved as a route history movement point?
+ * Validated Movement Rules:
+ * 1. Ignore updates with very poor accuracy (> 100m or missing).
+ * 2. Apply dynamic, accuracy-aware movement threshold accounting for both previous & new GPS accuracy radii.
+ * 3. Validate speed to reject unrealistic GPS teleport jumps (> 180 km/h).
+ * 4. Never record periodic updates while stationary (time elapsed alone is NOT movement).
  */
 export function shouldRecordLocationUpdate(
   lastSavedLocation: {
@@ -51,11 +53,27 @@ export function shouldRecordLocationUpdate(
     timestamp: number;
   }
 ): { shouldRecord: boolean; reason: string } {
-  if (!lastSavedLocation) {
-    return { shouldRecord: true, reason: 'Initial location acquisition' };
+  const newAcc = newLocation.accuracy !== null && newLocation.accuracy !== undefined && !isNaN(newLocation.accuracy)
+    ? newLocation.accuracy
+    : 9999;
+
+  // Rule 1: Reject updates with poor accuracy
+  if (newAcc > MAX_POOR_ACCURACY_METERS) {
+    return {
+      shouldRecord: false,
+      reason: `Poor GPS accuracy (±${Math.round(newAcc)}m exceeds max ±${MAX_POOR_ACCURACY_METERS}m)`,
+    };
   }
 
-  const timeDiffMs = newLocation.timestamp - lastSavedLocation.timestamp;
+  // Initial valid point acquisition
+  if (!lastSavedLocation) {
+    return { shouldRecord: true, reason: `Initial location fix acquired (±${Math.round(newAcc)}m)` };
+  }
+
+  const prevAcc = lastSavedLocation.accuracy !== null && lastSavedLocation.accuracy !== undefined && !isNaN(lastSavedLocation.accuracy)
+    ? lastSavedLocation.accuracy
+    : 9999;
+
   const distanceMoved = calculateDistanceInMeters(
     lastSavedLocation.latitude,
     lastSavedLocation.longitude,
@@ -63,33 +81,32 @@ export function shouldRecordLocationUpdate(
     newLocation.longitude
   );
 
-  const prevAcc = lastSavedLocation.accuracy ?? 9999;
-  const newAcc = newLocation.accuracy ?? 9999;
-  const accuracyImprovedSignificantly =
-    newAcc < prevAcc && (prevAcc - newAcc >= 10 || newAcc <= prevAcc * 0.75);
+  // Rule 2: Accuracy-aware movement threshold (accounts for GPS accuracy radius of both points)
+  // E.g., if accuracy is ±80m for both, required distance = max(15, 0.6 * (80 + 80)) = 96m
+  const requiredDistance = Math.max(15, 0.6 * (prevAcc + newAcc));
 
-  if (accuracyImprovedSignificantly) {
+  if (distanceMoved < requiredDistance) {
     return {
-      shouldRecord: true,
-      reason: `Accuracy improved from ±${Math.round(prevAcc)}m to ±${Math.round(newAcc)}m`,
+      shouldRecord: false,
+      reason: `Stationary GPS drift ignored (${Math.round(distanceMoved)}m < threshold ${Math.round(requiredDistance)}m)`,
     };
   }
 
-  if (distanceMoved >= 10) {
+  // Rule 3: Speed validation against unrealistic jumps
+  const timeDiffSec = Math.max(0.1, (newLocation.timestamp - lastSavedLocation.timestamp) / 1000);
+  const speedMps = distanceMoved / timeDiffSec;
+
+  if (speedMps > MAX_REALISTIC_SPEED_MPS) {
     return {
-      shouldRecord: true,
-      reason: `Moved ${Math.round(distanceMoved)}m (threshold ≥ 10m)`,
+      shouldRecord: false,
+      reason: `Unrealistic speed jump rejected (${Math.round(speedMps * 3.6)} km/h > ${Math.round(MAX_REALISTIC_SPEED_MPS * 3.6)} km/h)`,
     };
   }
 
-  if (timeDiffMs >= 5000) {
-    return {
-      shouldRecord: true,
-      reason: `Time interval ${Math.round(timeDiffMs / 1000)}s passed (threshold ≥ 5s)`,
-    };
-  }
-
-  return { shouldRecord: false, reason: 'Duplicate or unchanged position' };
+  return {
+    shouldRecord: true,
+    reason: `Validated physical movement detected (${Math.round(distanceMoved)}m >= threshold ${Math.round(requiredDistance)}m)`,
+  };
 }
 
 export function formatAccuracy(accuracy?: number | null): string {
@@ -131,28 +148,97 @@ export function isAccuracyPoor(accuracy?: number | null): boolean {
   return accuracy > 50; // Threshold for warning message
 }
 
+export interface RoutePoint {
+  latitude: number;
+  longitude: number;
+  accuracy?: number | null;
+  created_at?: string;
+  timestamp?: number;
+}
+
 /**
- * Calculate cumulative distance across consecutive geographic coordinates in meters.
+ * Filter out invalid coordinates, poor accuracy readings, stationary GPS drift, and unrealistic speed jumps.
+ */
+export function filterRoutePoints<T extends RoutePoint>(points: T[]): T[] {
+  if (!Array.isArray(points)) return [];
+
+  const filtered: T[] = [];
+
+  for (const p of points) {
+    if (!p) continue;
+    const lat = Number(p.latitude);
+    const lng = Number(p.longitude);
+    const acc = p.accuracy !== null && p.accuracy !== undefined && !isNaN(Number(p.accuracy))
+      ? Number(p.accuracy)
+      : null;
+
+    if (
+      isNaN(lat) ||
+      isNaN(lng) ||
+      lat < -90 ||
+      lat > 90 ||
+      lng < -180 ||
+      lng > 180
+    ) {
+      continue;
+    }
+
+    // Filter out points with poor accuracy (> 100 meters)
+    if (acc !== null && acc > MAX_POOR_ACCURACY_METERS) {
+      continue;
+    }
+
+    if (filtered.length > 0) {
+      const prev = filtered[filtered.length - 1];
+      const dist = calculateDistanceInMeters(prev.latitude, prev.longitude, lat, lng);
+
+      const prevAcc = prev.accuracy !== null && prev.accuracy !== undefined ? prev.accuracy : 50;
+      const currAcc = acc !== null ? acc : 50;
+
+      // Accuracy-aware minimum movement threshold
+      const reqDist = Math.max(15, 0.6 * (prevAcc + currAcc));
+      if (dist < reqDist) {
+        continue; // Skip stationary drift / jitter points
+      }
+
+      // Speed validation if timestamps exist
+      const pTime = p.timestamp || (p.created_at ? new Date(p.created_at).getTime() : null);
+      const prevTime = prev.timestamp || (prev.created_at ? new Date(prev.created_at).getTime() : null);
+
+      if (pTime && prevTime && pTime > prevTime) {
+        const timeDiffSec = (pTime - prevTime) / 1000;
+        if (timeDiffSec > 0) {
+          const speedMps = dist / timeDiffSec;
+          if (speedMps > MAX_REALISTIC_SPEED_MPS) {
+            continue; // Skip unrealistic jump
+          }
+        }
+      }
+    }
+
+    filtered.push({ ...p, latitude: lat, longitude: lng, accuracy: acc });
+  }
+
+  return filtered;
+}
+
+/**
+ * Calculate cumulative distance across consecutive validated geographic coordinates in meters.
+ * Excludes duplicate/jitter points and inaccurate coordinates.
  */
 export function calculateCumulativeDistance(
-  points: Array<{ latitude: number; longitude: number }>
+  points: Array<{ latitude: number; longitude: number; accuracy?: number | null; created_at?: string; timestamp?: number }>
 ): number {
   if (!Array.isArray(points) || points.length < 2) return 0;
 
+  const validPoints = filterRoutePoints(points);
+  if (validPoints.length < 2) return 0;
+
   let totalMeters = 0;
-  for (let i = 0; i < points.length - 1; i++) {
-    const p1 = points[i];
-    const p2 = points[i + 1];
-    if (
-      p1 &&
-      p2 &&
-      !isNaN(p1.latitude) &&
-      !isNaN(p1.longitude) &&
-      !isNaN(p2.latitude) &&
-      !isNaN(p2.longitude)
-    ) {
-      totalMeters += calculateDistanceInMeters(p1.latitude, p1.longitude, p2.latitude, p2.longitude);
-    }
+  for (let i = 0; i < validPoints.length - 1; i++) {
+    const p1 = validPoints[i];
+    const p2 = validPoints[i + 1];
+    totalMeters += calculateDistanceInMeters(p1.latitude, p1.longitude, p2.latitude, p2.longitude);
   }
 
   return totalMeters;

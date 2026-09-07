@@ -1,11 +1,7 @@
 import { LocationUpdate } from '../types';
-import { calculateDistanceInMeters } from '../utils/geo';
+import { calculateDistanceInMeters, filterRoutePoints, RoutePoint } from '../utils/geo';
 
-export interface RoutePoint {
-  latitude: number;
-  longitude: number;
-  accuracy?: number | null;
-}
+export type { RoutePoint };
 
 export interface RouteResponse {
   ok: boolean;
@@ -16,42 +12,7 @@ export interface RouteResponse {
   error?: string;
 }
 
-/**
- * Filter out invalid coordinates and consecutive duplicate points (< 2m apart).
- */
-export function filterRoutePoints(points: RoutePoint[]): RoutePoint[] {
-  if (!Array.isArray(points)) return [];
-
-  const filtered: RoutePoint[] = [];
-
-  for (const p of points) {
-    if (!p) continue;
-    const lat = Number(p.latitude);
-    const lng = Number(p.longitude);
-
-    if (
-      isNaN(lat) ||
-      isNaN(lng) ||
-      lat < -90 ||
-      lat > 90 ||
-      lng < -180 ||
-      lng > 180
-    ) {
-      continue;
-    }
-
-    if (filtered.length > 0) {
-      const prev = filtered[filtered.length - 1];
-      const dist = calculateDistanceInMeters(prev.latitude, prev.longitude, lat, lng);
-      // Skip points closer than 2 meters
-      if (dist < 2) continue;
-    }
-
-    filtered.push({ latitude: lat, longitude: lng, accuracy: p.accuracy });
-  }
-
-  return filtered;
-}
+export { filterRoutePoints };
 
 /**
  * Ramer-Douglas-Peucker algorithm to simplify long GPS trajectories before sending to route matching API.
