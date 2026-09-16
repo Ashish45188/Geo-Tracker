@@ -1,20 +1,66 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Geo-Tracker
 
-# Run and deploy your AI Studio app
+A real-time location tracking and route management system built with React, Supabase, Google Maps, and Geolocation APIs.
 
-This contains everything you need to run your app locally.
+## 🚀 Live Demo
 
-View your app in AI Studio: https://ai.studio/apps/d9653927-d816-4474-bd80-184063cdc16a
+[Open Geo-Tracker](https://abcvideo123.vercel.app)
 
-## Run Locally
+## 📌 Overview
 
-**Prerequisites:**  Node.js
+Geo-Tracker is a web-based real-time location tracking system designed to monitor live locations, manage location updates, and visualize movement routes on a map.
 
+The system focuses on reliable GPS tracking, location freshness, route filtering, and accurate map visualization.
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## ✨ Features
+
+- 📍 Real-time location tracking
+- 🗺️ Google Maps integration
+- 🛣️ Route and travel path visualization
+- 📡 Geolocation API integration
+- 🔄 Automatic location updates and heartbeat
+- ⏱️ Location freshness and last-seen tracking
+- 🎯 GPS accuracy filtering
+- 🚗 Speed-based location filtering
+- 📏 Distance calculation
+- 🔴 Detection of stale/expired locations
+- 🔁 Retry and recovery mechanism for location updates
+- ☁️ Supabase database integration
+- 📱 Responsive web interface
+
+## 🛠️ Tech Stack
+
+### Frontend
+- React
+- JavaScript / TypeScript
+- HTML5
+- CSS
+
+### Backend & Database
+- Supabase
+- REST APIs
+- Real-time data synchronization
+
+### APIs & Services
+- Google Maps
+- Browser Geolocation API
+- Gemini API
+
+### Deployment
+- Vercel
+- GitHub
+
+## 🏗️ Project Structure
+
+```text
+Geo-Tracker/
+├── api/
+├── src/
+│   ├── components/
+│   ├── hooks/
+│   ├── services/
+│   └── utils/
+├── public/
+├── index.html
+├── package.json
+└── README.md
